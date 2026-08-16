@@ -1,0 +1,6 @@
+interface:
+  display_name: "Codex + Claude 协调器"
+  short_description: "Codex 主导并通过 OMC 调度 Claude 实现和测试"
+  default_prompt: "使用 $codex-claude-coordinator 拆解此任务，选择合适的 oh-my-claudecode 工作流委派实现和测试，然后由 Codex 独立审查并验证结果。"
+policy:
+  allow_implicit_invocation: true
