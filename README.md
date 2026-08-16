@@ -118,11 +118,12 @@ bash "$SKILL_DIR/scripts/delegate-to-claude.sh" \
   --max-runtime-seconds 3600 \
   --idle-timeout-seconds 900 \
   --heartbeat-seconds 30 \
-  --max-subagents 4 \
+  --max-subagents 10 \
   --max-repair-rounds 3
 ```
 
 如需额外复制最终报告，增加 `--report-file /absolute/path/to/report.txt`。
+`--max-subagents` 的默认值现在是 `10`；可针对资源受限或高风险任务显式调低。
 
 任务契约模板位于 [`references/task-contract.md`](skills/codex-claude-coordinator/references/task-contract.md)，完整工作流参见 [`SKILL.md`](skills/codex-claude-coordinator/SKILL.md)，状态字段与排障参见 [`references/runtime-monitoring.md`](skills/codex-claude-coordinator/references/runtime-monitoring.md)。
 

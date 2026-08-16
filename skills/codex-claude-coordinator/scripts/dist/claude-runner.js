@@ -13,7 +13,7 @@ const usage = `用法：delegate-to-claude.sh --workdir DIR --task-file FILE [�
   --max-runtime-seconds N        总运行时限（默认：3600）。
   --idle-timeout-seconds N       无事件时限（默认：900）。
   --heartbeat-seconds N          状态心跳间隔（默认：30）。
-  --max-subagents N              单次委派最多子代理数（默认：4）。
+  --max-subagents N              单次委派最多子代理数（默认：10）。
   --max-repair-rounds N          契约允许的最多修复轮数（默认：3）。
   -h, --help                     显示帮助。`;
 function positiveInteger(value, option) {
@@ -63,7 +63,7 @@ function parseArgs(argv) {
         maxRuntimeSeconds: positiveInteger(values.get("--max-runtime-seconds") ?? "3600", "--max-runtime-seconds"),
         idleTimeoutSeconds: positiveInteger(values.get("--idle-timeout-seconds") ?? "900", "--idle-timeout-seconds"),
         heartbeatSeconds: positiveInteger(values.get("--heartbeat-seconds") ?? "30", "--heartbeat-seconds"),
-        maxSubagents: positiveInteger(values.get("--max-subagents") ?? "4", "--max-subagents"),
+        maxSubagents: positiveInteger(values.get("--max-subagents") ?? "10", "--max-subagents"),
         maxRepairRounds: positiveInteger(values.get("--max-repair-rounds") ?? "3", "--max-repair-rounds"),
     };
 }

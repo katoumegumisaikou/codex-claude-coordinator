@@ -77,7 +77,7 @@ bash "$SKILL_DIR/scripts/delegate-to-claude.sh" \
   --max-runtime-seconds 3600 \
   --idle-timeout-seconds 900 \
   --heartbeat-seconds 30 \
-  --max-subagents 4 \
+  --max-subagents 10 \
   --max-repair-rounds 3
 ```
 

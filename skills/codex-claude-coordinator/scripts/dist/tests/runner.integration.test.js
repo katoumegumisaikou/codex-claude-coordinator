@@ -37,6 +37,7 @@ test("runner persists project-local status, events, hooks, logs, and report", ()
         assert.equal(status.phaseLabel, "交付");
         assert.equal(status.counters.subagentsStarted, 1);
         assert.equal(status.counters.hookEvents, 5);
+        assert.equal(status.limits.maxSubagents, 10);
         assert.equal(existsSync(status.files.events), true);
         assert.equal(existsSync(status.files.finalReport), true);
         assert.equal(existsSync(status.files.status), true);
