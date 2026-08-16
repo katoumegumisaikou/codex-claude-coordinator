@@ -127,6 +127,120 @@ bash "$SKILL_DIR/scripts/delegate-to-claude.sh" \
 
 任务契约模板位于 [`references/task-contract.md`](skills/codex-claude-coordinator/references/task-contract.md)，完整工作流参见 [`SKILL.md`](skills/codex-claude-coordinator/SKILL.md)，状态字段与排障参见 [`references/runtime-monitoring.md`](skills/codex-claude-coordinator/references/runtime-monitoring.md)。
 
+## 完整工作流如何推进
+
+整个工作流由三层协作：
+
+```text
+用户
+  ↓
+Codex 主代理：分析、拆解、制定契约、最终验收
+  ↓
+TypeScript 协调器：启动 Claude、监听事件、维护状态、执行限制
+  ↓
+Claude Code 实现代理
+  ↓
+OMC 主工作流及其子代理
+```
+
+### 1. Codex 分析任务
+
+Codex 检查仓库和现有 Git 状态，明确目标、非目标、允许修改范围、验收标准、验证命令及安全约束。架构决策和模糊需求的澄清仍由 Codex 负责。
+
+### 2. Codex 建立基线
+
+Codex 在委派前运行适合当前项目的最小检查，记录已有失败，避免把原有问题误判为 Claude 引入的回归。
+
+### 3. Codex 编写任务契约
+
+Codex 根据 `references/task-contract.md` 生成任务文件，并在其中写明：
+
+- Claude 可以修改的范围；
+- 一个准确的 OMC 主工作流调用；
+- 测试和验收标准；
+- 默认最多 10 个子代理和 3 轮修复；
+- 单写入者或独立 worktree 隔离方式；
+- 禁止提交、推送、重置、变基、切换分支和修改密钥。
+
+Claude 不会自动继承 Codex 当前加载的 Skills，因此所有需要 Claude 遵守的关键规则都必须写入契约。
+
+### 4. Codex 启动委派脚本
+
+Codex 运行 `delegate-to-claude.sh`。Bash 包装脚本定位 Node.js 和已编译的运行器，然后通过 `exec` 启动 `scripts/dist/claude-runner.js`，不截断其标准输出或标准错误。
+
+### 5. 协调器初始化运行环境
+
+TypeScript 协调器解析 Git 项目根目录，创建唯一 `run-id`、运行文件和 `active.lock`。锁用于阻止同一项目同时运行两个写入型 Claude 任务。协调器还会自动把 `/.codex/claude-coordinator/` 加入项目 `.gitignore`。
+
+### 6. 协调器启动 Claude 和 OMC
+
+协调器通过标准输入把任务契约发送给 Claude，并以 `stream-json`、hook events、临时观察插件、`auto` 权限模式和无会话持久化方式启动 Claude。Claude 必须实际调用契约指定的 OMC 工作流，不得只模拟其行为；OMC 不可用时应报告阻塞。
+
+同一 Claude 会话只能有一个 OMC 主循环控制者。OMC 可以继续启动子代理，但超过 10 个时协调器会终止本次任务。
+
+### 7. 协调器监听 Claude 和子代理
+
+协调器同时消费两条事件通道：
+
+```text
+Claude stdout ── stream-json ────────────┐
+                                         ├─→ 归一化事件 → status.json
+Claude hooks ── hook-events.jsonl ───────┘
+```
+
+观察插件记录会话、工具调用、工具失败、子代理启动/停止、通知和结束事件。`Read`、`Glob`、`Grep`、`Edit`、`Write`、`Bash` 等是 Hook 中报告的 Claude Code 工具名称；协调器只读取这些名称来推断阶段，不负责执行工具。
+
+阶段映射为“预检 → 调研 → 规划 → 实现 → 验证 → 交付”。Hook 文件每 500 毫秒检查一次，超时条件每秒检查一次，心跳默认每 30 秒输出一次。逐 token 文本和思考增量不会持久化。
+
+### 8. 协调器保存项目内状态
+
+最新状态统一保存到通用项目路径：
+
+```text
+<project>/.codex/claude-coordinator/status.json
+```
+
+本次运行的事件、日志、最终报告和状态快照保存在：
+
+```text
+<project>/.codex/claude-coordinator/runs/<run-id>/
+```
+
+这些文件记录 Claude、OMC 和 OMC 子代理的状态，不记录 Codex 主代理自身状态。
+
+### 9. 心跳返回 Codex
+
+协调器每 30 秒更新一次状态文件，并把心跳写入 stderr。心跳不会主动唤醒 Codex；只有 Codex 启动了该终端任务，并再次等待或读取运行中任务的新增输出时，心跳才会进入 Codex 上下文。
+
+本地更新状态、轮询 Hook 和生成心跳不调用 Codex 模型。Codex 读取并分析终端输出时才会产生相应模型用量。
+
+### 10. 协调器结束运行
+
+正常情况下，Claude 子进程触发 `close` 后，协调器处理最后事件、写入 `final-report.txt`、设置最终状态、清除定时器并删除 `active.lock`。
+
+总运行时间超过 3600 秒或连续 900 秒没有事件时，协调器先向 Claude 发送 `SIGTERM`，5 秒后仍未退出则发送 `SIGKILL`。最终退出码含义如下：
+
+- `0`：Claude 正常完成；
+- `3`：Claude 报告阻塞；
+- `124`：任务超时；
+- 其他非零值：执行失败。
+
+Claude 状态为 `completed` 只表示委派结束，不代表 Codex 已验收通过。
+
+### 11. Codex 独立审查
+
+Claude 结束后，Codex 检查完整 diff、所有新增文件、范围合规性、安全性、错误处理和测试质量，并独立重跑关键验证命令。Claude 报告只作为待核验证据。
+
+### 12. Codex 发起修复循环
+
+若验收失败，Codex 使用具体失败命令、简明输出和涉及文件创建新的修复契约，再次委派 Claude 并重新验收。默认最多三轮；当前轮数主要由 Skill 和契约约束，协调器尚未跨多次运行维护硬性计数器。
+
+### 13. Codex 最终交付
+
+全部验收标准都有独立证据后，Codex 才向用户交付结果，并区分 Claude 的报告、Codex 的复验结果、剩余风险和需要用户执行的操作。
+
+当前有意保留以下职责边界：Codex 自身状态不写入 `status.json`，心跳不主动唤醒 Codex，不强制规定 Codex 的等待间隔，不跨运行强制计算修复轮数，最终审查继续由 Skill 指令驱动而不是 TypeScript 状态机自动执行。
+
 ## 运行状态在哪里
 
 脚本自动把 `/.codex/claude-coordinator/` 加入目标项目的 `.gitignore`，并在项目内保存：
