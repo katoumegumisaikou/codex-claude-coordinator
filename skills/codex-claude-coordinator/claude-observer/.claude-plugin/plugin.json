@@ -1,0 +1,8 @@
+{
+  "name": "codex-claude-observer",
+  "version": "0.1.0",
+  "description": "Records sanitized Claude Code lifecycle, tool, and subagent events for the Codex coordinator.",
+  "author": {
+    "name": "katoumegumisaikou"
+  }
+}
