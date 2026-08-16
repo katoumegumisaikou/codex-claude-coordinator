@@ -2,14 +2,46 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync
 import { dirname, join } from "node:path";
 
 export type RunState = "queued" | "running" | "completed" | "blocked" | "failed" | "timed_out";
+export type TimeoutProfile = "small" | "general" | "heavy" | "unlimited";
+export type TimeoutKind = "runtime" | "idle";
+
+export interface TimeoutLimits {
+  maxRuntimeSeconds: number | null;
+  idleTimeoutSeconds: number | null;
+}
+
+const TIMEOUT_PROFILES: Record<TimeoutProfile, TimeoutLimits> = {
+  small: { maxRuntimeSeconds: 1_200, idleTimeoutSeconds: 300 },
+  general: { maxRuntimeSeconds: 3_600, idleTimeoutSeconds: 900 },
+  heavy: { maxRuntimeSeconds: 14_400, idleTimeoutSeconds: 1_800 },
+  unlimited: { maxRuntimeSeconds: null, idleTimeoutSeconds: null },
+};
+
+export function timeoutLimitsForProfile(profile: TimeoutProfile): TimeoutLimits {
+  return { ...TIMEOUT_PROFILES[profile] };
+}
+
+export function timeoutKindAt(
+  nowMs: number,
+  startedAtMs: number,
+  lastEventAtMs: number,
+  limits: TimeoutLimits,
+): TimeoutKind | undefined {
+  if (limits.maxRuntimeSeconds !== null && nowMs - startedAtMs >= limits.maxRuntimeSeconds * 1_000) return "runtime";
+  if (limits.idleTimeoutSeconds !== null && nowMs - lastEventAtMs >= limits.idleTimeoutSeconds * 1_000) return "idle";
+  return undefined;
+}
 
 export interface NormalizedEvent {
   timestamp: string;
   source: "runner" | "claude-stream" | "claude-hook";
   kind: string;
+  eventId?: string;
+  observedAtUnixMs?: number;
   sessionId?: string;
   agentId?: string;
   agentType?: string;
+  toolUseId?: string;
   toolName?: string;
   summary?: string;
   data?: unknown;
@@ -121,9 +153,12 @@ export function normalizeHookEvent(raw: unknown, timestamp = new Date().toISOStr
     timestamp: stringField(raw, "timestamp") ?? timestamp,
     source: "claude-hook",
     kind: hookName,
+    eventId: stringField(raw, "eventId", "event_id"),
+    observedAtUnixMs: numberField(raw, "observedAtUnixMs", "observed_at_unix_ms"),
     sessionId: stringField(raw, "sessionId", "session_id"),
     agentId: stringField(raw, "agentId", "agent_id"),
     agentType: stringField(raw, "agentType", "agent_type"),
+    toolUseId: stringField(raw, "toolUseId", "tool_use_id"),
     toolName,
     summary,
     data: sanitizeValue(raw),
@@ -143,6 +178,7 @@ export function normalizeStreamEvent(raw: unknown, timestamp = new Date().toISOS
   if (!isRecord(raw)) return undefined;
   const type = stringField(raw, "type") ?? "unknown";
   let kind = type;
+  let toolUseId: string | undefined;
   let toolName: string | undefined;
   let summary: string | undefined;
 
@@ -157,6 +193,7 @@ export function normalizeStreamEvent(raw: unknown, timestamp = new Date().toISOS
     kind = eventType ? `stream:${eventType}` : type;
     const contentBlock = nestedRecord(event, "content_block");
     if (stringField(contentBlock, "type") === "tool_use") {
+      toolUseId = stringField(contentBlock, "id");
       toolName = stringField(contentBlock, "name");
       summary = safeToolSummary({ tool_input: contentBlock?.input });
     }
@@ -173,7 +210,9 @@ export function normalizeStreamEvent(raw: unknown, timestamp = new Date().toISOS
     timestamp,
     source: "claude-stream",
     kind,
+    eventId: stringField(raw, "uuid"),
     sessionId: stringField(raw, "session_id"),
+    toolUseId,
     toolName,
     summary,
     data: safeData,

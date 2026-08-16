@@ -1,4 +1,5 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const runDirectory = process.env.CODEX_CLAUDE_RUN_DIR;
@@ -27,10 +28,15 @@ const toolSummary = (toolInput) => {
   return undefined;
 };
 
+let temporaryPath;
 try {
   const raw = JSON.parse(input);
+  const observedAtUnixMs = Date.now();
+  const eventId = randomUUID();
   const event = {
-    timestamp: new Date().toISOString(),
+    eventId,
+    observedAtUnixMs,
+    timestamp: new Date(observedAtUnixMs).toISOString(),
     hookEventName: raw.hook_event_name,
     sessionId: raw.session_id,
     agentId: raw.agent_id,
@@ -44,8 +50,14 @@ try {
     error: redact(raw.error, 240),
     source: raw.source,
   };
-  mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
-  appendFileSync(join(runDirectory, "hook-events.jsonl"), `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600 });
+  const inboxDirectory = join(runDirectory, "hooks-inbox");
+  mkdirSync(inboxDirectory, { recursive: true, mode: 0o700 });
+  const baseName = `${String(observedAtUnixMs).padStart(13, "0")}-${process.pid}-${eventId}`;
+  temporaryPath = join(inboxDirectory, `.${baseName}.tmp`);
+  const readyPath = join(inboxDirectory, `${baseName}.ready.json`);
+  writeFileSync(temporaryPath, `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  renameSync(temporaryPath, readyPath);
 } catch {
+  if (temporaryPath) rmSync(temporaryPath, { force: true });
   // Observation must never block Claude Code.
 }

@@ -11,6 +11,8 @@ import {
   redactText,
   reportIndicatesBlocker,
   sanitizeValue,
+  timeoutKindAt,
+  timeoutLimitsForProfile,
 } from "../monitor.js";
 
 test("redacts common credentials and sensitive keys", () => {
@@ -60,6 +62,25 @@ test("normalizes tool-use stream events and extracts only the final result", () 
   assert.equal(normalizeStreamEvent({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "hidden" } } }), undefined);
   assert.equal(extractFinalReport({ type: "assistant", result: "wrong" }), undefined);
   assert.equal(extractFinalReport({ type: "result", result: "done" }), "done");
+});
+
+test("resolves timeout profiles without sharing mutable objects", () => {
+  assert.deepEqual(timeoutLimitsForProfile("small"), { maxRuntimeSeconds: 1_200, idleTimeoutSeconds: 300 });
+  assert.deepEqual(timeoutLimitsForProfile("general"), { maxRuntimeSeconds: 3_600, idleTimeoutSeconds: 900 });
+  assert.deepEqual(timeoutLimitsForProfile("heavy"), { maxRuntimeSeconds: 14_400, idleTimeoutSeconds: 1_800 });
+  assert.deepEqual(timeoutLimitsForProfile("unlimited"), { maxRuntimeSeconds: null, idleTimeoutSeconds: null });
+
+  const first = timeoutLimitsForProfile("small");
+  first.maxRuntimeSeconds = 1;
+  assert.equal(timeoutLimitsForProfile("small").maxRuntimeSeconds, 1_200);
+});
+
+test("distinguishes runtime and idle timeout causes", () => {
+  const limits = { maxRuntimeSeconds: 10, idleTimeoutSeconds: 5 };
+  assert.equal(timeoutKindAt(10_000, 0, 9_000, limits), "runtime");
+  assert.equal(timeoutKindAt(6_000, 0, 0, limits), "idle");
+  assert.equal(timeoutKindAt(4_000, 0, 0, limits), undefined);
+  assert.equal(timeoutKindAt(100_000, 0, 0, { maxRuntimeSeconds: null, idleTimeoutSeconds: null }), undefined);
 });
 
 test("detects substantive blocker reports", () => {

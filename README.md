@@ -8,8 +8,8 @@
 - 将实现工作委派给 Claude Code，同时禁止其提交、推送、重置、变基、切换分支或修改密钥。
 - 在 Claude Code 已安装 oh-my-claudecode（OMC）时，为任务选择并约束 `autopilot`、`ralph`、`team`、`ultrawork` 或 `ultraqa` 工作流。
 - 保持单写入者原则；只有只读任务或独立 worktree 中的任务才允许并行。
-- 通过 Claude `stream-json` 与临时观察插件实时跟踪工具调用、OMC 子代理、耗时和最终状态。
-- 使用心跳、总运行时限、空闲时限、最大子代理数和最大修复轮数约束长时间任务，包括 `ralph`。
+- 通过 Claude `stream-json` 与原子 Hook inbox 实时跟踪工具调用、OMC 子代理、耗时和最终状态。
+- 使用四档超时配置、心跳、最大子代理数和最大修复轮数约束长时间任务，包括 `ralph`。
 - 将 Claude 的报告视为待验证声明，由 Codex 独立检查 diff、重跑测试并决定是否验收。
 - 验收失败时生成包含失败证据的修复契约，并进行有上限的修复循环。
 
@@ -115,8 +115,7 @@ SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/codex-claude-coordinator"
 bash "$SKILL_DIR/scripts/delegate-to-claude.sh" \
   --workdir "$PWD" \
   --task-file "/absolute/path/to/task.md" \
-  --max-runtime-seconds 3600 \
-  --idle-timeout-seconds 900 \
+  --timeout-profile general \
   --heartbeat-seconds 30 \
   --max-subagents 10 \
   --max-repair-rounds 3
@@ -124,6 +123,17 @@ bash "$SKILL_DIR/scripts/delegate-to-claude.sh" \
 
 如需额外复制最终报告，增加 `--report-file /absolute/path/to/report.txt`。
 `--max-subagents` 的默认值现在是 `10`；可针对资源受限或高风险任务显式调低。
+
+超时配置档由 Codex 在启动 Claude 前根据任务契约选择：
+
+| 任务类型 | 参数 | 总时限 | 空闲时限 | 适用范围 |
+| --- | --- | ---: | ---: | --- |
+| 小任务 | `small` | 20 分钟 | 5 分钟 | 单点修复、少量文件、快速测试 |
+| 通用任务 | `general` | 60 分钟 | 15 分钟 | 普通功能、多文件修改、完整测试 |
+| 重型任务 | `heavy` | 4 小时 | 30 分钟 | 跨模块重构、打包、E2E、依赖下载 |
+| 不超时任务 | `unlimited` | 关闭 | 关闭 | 只能由用户明确选择 |
+
+未指定时使用 `general`。`--max-runtime-seconds N|off` 和 `--idle-timeout-seconds N|off` 可以分别覆盖配置档。`unlimited` 只关闭协调器自身的时间限制；Claude API、网络、操作系统或调用环境仍可能超时，心跳、运行锁、子代理数和修复轮数限制继续生效。
 
 任务契约模板位于 [`references/task-contract.md`](skills/codex-claude-coordinator/references/task-contract.md)，完整工作流参见 [`SKILL.md`](skills/codex-claude-coordinator/SKILL.md)，状态字段与排障参见 [`references/runtime-monitoring.md`](skills/codex-claude-coordinator/references/runtime-monitoring.md)。
 
@@ -158,6 +168,7 @@ Codex 根据 `references/task-contract.md` 生成任务文件，并在其中写�
 - Claude 可以修改的范围；
 - 一个准确的 OMC 主工作流调用；
 - 测试和验收标准；
+- 一个与任务规模匹配的超时配置档；
 - 默认最多 10 个子代理和 3 轮修复；
 - 单写入者或独立 worktree 隔离方式；
 - 禁止提交、推送、重置、变基、切换分支和修改密钥。
@@ -185,12 +196,14 @@ TypeScript 协调器解析 Git 项目根目录，创建唯一 `run-id`、运行�
 ```text
 Claude stdout ── stream-json ────────────┐
                                          ├─→ 归一化事件 → status.json
-Claude hooks ── hook-events.jsonl ───────┘
+Claude hooks ─→ hooks-inbox/*.ready ─────┘
+                         ↓ runner 单一聚合写入
+                   hook-events.jsonl + events.jsonl
 ```
 
-观察插件记录会话、工具调用、工具失败、子代理启动/停止、通知和结束事件。`Read`、`Glob`、`Grep`、`Edit`、`Write`、`Bash` 等只是 Hook 报告的 Claude Code 工具名称；协调器据此记录已经发生的客观活动，不负责执行工具，也不把工具名称映射为 Claude/OMC 的内部工作阶段。
+观察插件记录会话、工具调用、工具失败、子代理启动/停止、通知和结束事件。每个 Hook 先写入独立临时文件，再原子重命名为 `.ready.json`；它们不再并发追加公共 JSONL。runner 按文件名稳定排序、去重并聚合写入 `hook-events.jsonl`、`events.jsonl` 和 `status.json`，无法解析的文件会隔离到 `hooks-rejected/`。
 
-`PreToolUse` 设置 `currentActivity`，`PostToolUse` 或 `PostToolUseFailure` 清除对应活动，`SubagentStart` 和 `SubagentStop` 更新 `agents`。Hook 文件每 500 毫秒检查一次，超时条件每秒检查一次，心跳默认每 30 秒输出一次。逐 token 文本和思考增量不会持久化。
+`PreToolUse` 按 `toolUseId` 登记活动，`PostToolUse` 或 `PostToolUseFailure` 只清除对应调用，`SubagentStart` 和 `SubagentStop` 更新 `agents`。因此并发子代理的工具活动不会互相覆盖。inbox 每 500 毫秒检查一次，Claude 退出后还会短暂排空；超时条件每秒检查一次，心跳默认每 30 秒输出一次。逐 token 文本和思考增量不会持久化。
 
 ### 8. 协调器保存项目内状态
 
@@ -218,7 +231,7 @@ Claude hooks ── hook-events.jsonl ───────┘
 
 正常情况下，Claude 子进程触发 `close` 后，协调器处理最后事件、写入 `final-report.txt`、设置最终状态、清除定时器并删除 `active.lock`。
 
-总运行时间超过 3600 秒或连续 900 秒没有事件时，协调器先向 Claude 发送 `SIGTERM`，5 秒后仍未退出则发送 `SIGKILL`。最终退出码含义如下：
+达到当前配置档已启用的总时限或空闲时限时，协调器先向 Claude 发送 `SIGTERM`，5 秒后仍未退出则发送 `SIGKILL`。`status.json` 保持 `state: "timed_out"`，并使用 `timeout.kind` 区分 `runtime` 和 `idle`。最终退出码含义如下：
 
 - `0`：Claude 正常完成；
 - `3`：Claude 报告阻塞；
@@ -252,6 +265,8 @@ Claude 结束后，Codex 检查完整 diff、所有新增文件、范围合规�
    ├─ status.json
    ├─ events.jsonl
    ├─ hook-events.jsonl
+   ├─ hooks-inbox/
+   ├─ hooks-rejected/             # 仅出现无效事件时创建
    ├─ stderr.log
    └─ final-report.txt
 ```
@@ -262,9 +277,9 @@ Claude 结束后，Codex 检查完整 diff、所有新增文件、范围合规�
 cat .codex/claude-coordinator/status.json
 ```
 
-`status.json` 的 `state`、`currentActivity`、`agents`、`lastEventAt` 和 `files.events` 用于展示 Claude 的运行结果、当前工具、子代理和最近事件。结合 `stderr.log` 可以排查 API 等待或工具阻塞，但协调器不会据此推断 Claude/OMC 的计划或内部阶段。
+`status.json` 的 `state`、`currentActivity`、`agents`、`lastEventAt` 和 `files.events` 用于展示 Claude 的运行结果、当前工具、子代理和最近事件。`files.hookInbox`、`files.hookRejected`、`counters.hookDuplicates` 和 `counters.hookRejected` 用于排查 Hook 队列。结合 `stderr.log` 可以排查 API 等待或工具阻塞，但协调器不会据此推断 Claude/OMC 的计划或内部阶段。
 
-从 `schemaVersion: 2` 起，`status.json` 和 `events.jsonl` 不再包含 `phase` 或 `phaseLabel`。读取状态的工具应使用 `state` 判断结果，并使用 `currentActivity`、`agents`、时间戳和事件记录展示客观活动。旧运行目录中的 schema v1 文件是历史快照，不会被自动改写。
+从 `schemaVersion: 2` 起，`status.json` 和 `events.jsonl` 不再包含 `phase` 或 `phaseLabel`。从 `schemaVersion: 3` 起，生效配置记录在 `timeouts` 中；超时时还会写入 `timeout.kind`、`limitSeconds` 和 `triggeredAt`。读取状态的工具应使用 `state` 判断结果，并使用 `currentActivity`、`agents`、时间戳和事件记录展示客观活动。旧运行目录中的 schema v1/v2 文件是历史快照，不会被自动改写。
 
 ## 开发与验证
 
@@ -281,6 +296,7 @@ claude plugin validate ./claude-observer
 - 不使用 `--dangerously-skip-permissions`。
 - 不在同一工作树中并行运行多个写入代理。
 - 观察插件通过 `--plugin-dir` 临时加载，不覆盖用户或 OMC 的现有 hooks 和 settings。
+- Hook 进程只原子发布独立事件文件，公共 JSONL 和状态文件只由 runner 写入。
 - 状态事件不保存 prompt、thinking、完整工具响应或 transcript 路径；常见密钥与过长摘要会被脱敏。
 - 不让 Claude 提交或推送代码。
 - 不因 OMC 不可用而静默模拟或更换工作流。

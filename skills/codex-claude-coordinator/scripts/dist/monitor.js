@@ -1,5 +1,21 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+const TIMEOUT_PROFILES = {
+    small: { maxRuntimeSeconds: 1_200, idleTimeoutSeconds: 300 },
+    general: { maxRuntimeSeconds: 3_600, idleTimeoutSeconds: 900 },
+    heavy: { maxRuntimeSeconds: 14_400, idleTimeoutSeconds: 1_800 },
+    unlimited: { maxRuntimeSeconds: null, idleTimeoutSeconds: null },
+};
+export function timeoutLimitsForProfile(profile) {
+    return { ...TIMEOUT_PROFILES[profile] };
+}
+export function timeoutKindAt(nowMs, startedAtMs, lastEventAtMs, limits) {
+    if (limits.maxRuntimeSeconds !== null && nowMs - startedAtMs >= limits.maxRuntimeSeconds * 1_000)
+        return "runtime";
+    if (limits.idleTimeoutSeconds !== null && nowMs - lastEventAtMs >= limits.idleTimeoutSeconds * 1_000)
+        return "idle";
+    return undefined;
+}
 const SECRET_KEY = /(?:authorization|cookie|credential|password|passwd|secret|token|api[_-]?key|private[_-]?key)/i;
 const OMITTED_KEY = /^(?:thinking|signature|prompt|transcript_path|tool_response|full_content)$/i;
 export function isRecord(value) {
@@ -111,9 +127,12 @@ export function normalizeHookEvent(raw, timestamp = new Date().toISOString()) {
         timestamp: stringField(raw, "timestamp") ?? timestamp,
         source: "claude-hook",
         kind: hookName,
+        eventId: stringField(raw, "eventId", "event_id"),
+        observedAtUnixMs: numberField(raw, "observedAtUnixMs", "observed_at_unix_ms"),
         sessionId: stringField(raw, "sessionId", "session_id"),
         agentId: stringField(raw, "agentId", "agent_id"),
         agentType: stringField(raw, "agentType", "agent_type"),
+        toolUseId: stringField(raw, "toolUseId", "tool_use_id"),
         toolName,
         summary,
         data: sanitizeValue(raw),
@@ -133,6 +152,7 @@ export function normalizeStreamEvent(raw, timestamp = new Date().toISOString()) 
         return undefined;
     const type = stringField(raw, "type") ?? "unknown";
     let kind = type;
+    let toolUseId;
     let toolName;
     let summary;
     if (type === "system") {
@@ -149,6 +169,7 @@ export function normalizeStreamEvent(raw, timestamp = new Date().toISOString()) 
         kind = eventType ? `stream:${eventType}` : type;
         const contentBlock = nestedRecord(event, "content_block");
         if (stringField(contentBlock, "type") === "tool_use") {
+            toolUseId = stringField(contentBlock, "id");
             toolName = stringField(contentBlock, "name");
             summary = safeToolSummary({ tool_input: contentBlock?.input });
         }
@@ -165,7 +186,9 @@ export function normalizeStreamEvent(raw, timestamp = new Date().toISOString()) 
         timestamp,
         source: "claude-stream",
         kind,
+        eventId: stringField(raw, "uuid"),
         sessionId: stringField(raw, "session_id"),
+        toolUseId,
         toolName,
         summary,
         data: safeData,

@@ -1,7 +1,9 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ToolActivityTracker } from "./activity-tracker.js";
+import { consumeHookInbox } from "./hook-inbox.js";
 import {
   appendJsonLine,
   atomicWriteJson,
@@ -9,7 +11,6 @@ import {
   ensureRuntimeIgnored,
   extractFinalReport,
   isRecord,
-  normalizeHookEvent,
   normalizeStreamEvent,
   numberField,
   redactText,
@@ -17,6 +18,10 @@ import {
   stringField,
   type NormalizedEvent,
   type RunState,
+  type TimeoutKind,
+  type TimeoutProfile,
+  timeoutKindAt,
+  timeoutLimitsForProfile,
 } from "./monitor.js";
 
 type PermissionMode = "acceptEdits" | "auto" | "manual" | "dontAsk" | "plan";
@@ -28,8 +33,9 @@ interface Options {
   permissionMode: PermissionMode;
   model?: string;
   maxBudgetUsd?: string;
-  maxRuntimeSeconds: number;
-  idleTimeoutSeconds: number;
+  timeoutProfile: TimeoutProfile;
+  maxRuntimeSeconds: number | null;
+  idleTimeoutSeconds: number | null;
   heartbeatSeconds: number;
   maxSubagents: number;
   maxRepairRounds: number;
@@ -48,12 +54,14 @@ interface Activity {
   kind: "tool" | "subagent" | "runner";
   label: string;
   startedAt: string;
+  eventId?: string;
+  toolUseId?: string;
   agentId?: string;
   toolName?: string;
 }
 
 interface RunStatus {
-  schemaVersion: 2;
+  schemaVersion: 3;
   runId: string;
   projectRoot: string;
   runDirectory: string;
@@ -71,15 +79,23 @@ interface RunStatus {
     hookEvents: number;
     toolCalls: number;
     subagentsStarted: number;
+    hookDuplicates: number;
+    hookRejected: number;
+  };
+  timeouts: {
+    profile: TimeoutProfile;
+    maxRuntimeSeconds: number | null;
+    idleTimeoutSeconds: number | null;
   };
   limits: {
-    maxRuntimeSeconds: number;
-    idleTimeoutSeconds: number;
     maxSubagents: number;
     maxRepairRounds: number;
   };
   files: {
     events: string;
+    hookEvents: string;
+    hookInbox: string;
+    hookRejected: string;
     stderr: string;
     finalReport: string;
     status: string;
@@ -88,6 +104,11 @@ interface RunStatus {
     subtype?: string;
     turns?: number;
     costUsd?: number;
+  };
+  timeout?: {
+    kind: TimeoutKind;
+    limitSeconds: number;
+    triggeredAt: string;
   };
   failureReason?: string;
 }
@@ -99,8 +120,9 @@ const usage = `用法：delegate-to-claude.sh --workdir DIR --task-file FILE [�
   --permission-mode MODE         Claude 权限模式（默认：auto）。
   --model MODEL                  可选 Claude 模型或别名。
   --max-budget-usd AMOUNT        可选最高 API 花费。
-  --max-runtime-seconds N        总运行时限（默认：3600）。
-  --idle-timeout-seconds N       无事件时限（默认：900）。
+  --timeout-profile PROFILE      small、general、heavy 或 unlimited（默认：general）。
+  --max-runtime-seconds N|off    覆盖配置档的总运行时限。
+  --idle-timeout-seconds N|off   覆盖配置档的无事件时限。
   --heartbeat-seconds N          状态心跳间隔（默认：30）。
   --max-subagents N              单次委派最多子代理数（默认：10）。
   --max-repair-rounds N          契约允许的最多修复轮数（默认：3）。
@@ -110,6 +132,12 @@ function positiveInteger(value: string, option: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${option} 必须是正整数。`);
   return parsed;
+}
+
+function timeoutValue(value: string | undefined, option: string, fallback: number | null): number | null {
+  if (value === undefined) return fallback;
+  if (value.toLowerCase() === "off") return null;
+  return positiveInteger(value, option);
 }
 
 function parseArgs(argv: string[]): Options {
@@ -134,10 +162,15 @@ function parseArgs(argv: string[]): Options {
   if (!["acceptEdits", "auto", "manual", "dontAsk", "plan"].includes(permissionMode)) {
     throw new Error(`不支持的权限模式：${permissionMode}`);
   }
+  const timeoutProfile = values.get("--timeout-profile") ?? "general";
+  if (!["small", "general", "heavy", "unlimited"].includes(timeoutProfile)) {
+    throw new Error(`不支持的超时配置档：${timeoutProfile}`);
+  }
+  const profileTimeouts = timeoutLimitsForProfile(timeoutProfile as TimeoutProfile);
 
   const known = new Set([
     "--workdir", "--task-file", "--report-file", "--permission-mode", "--model", "--max-budget-usd",
-    "--max-runtime-seconds", "--idle-timeout-seconds", "--heartbeat-seconds", "--max-subagents", "--max-repair-rounds",
+    "--timeout-profile", "--max-runtime-seconds", "--idle-timeout-seconds", "--heartbeat-seconds", "--max-subagents", "--max-repair-rounds",
   ]);
   for (const option of values.keys()) if (!known.has(option)) throw new Error(`未知参数：${option}`);
 
@@ -148,8 +181,9 @@ function parseArgs(argv: string[]): Options {
     permissionMode: permissionMode as PermissionMode,
     model: values.get("--model"),
     maxBudgetUsd: values.get("--max-budget-usd"),
-    maxRuntimeSeconds: positiveInteger(values.get("--max-runtime-seconds") ?? "3600", "--max-runtime-seconds"),
-    idleTimeoutSeconds: positiveInteger(values.get("--idle-timeout-seconds") ?? "900", "--idle-timeout-seconds"),
+    timeoutProfile: timeoutProfile as TimeoutProfile,
+    maxRuntimeSeconds: timeoutValue(values.get("--max-runtime-seconds"), "--max-runtime-seconds", profileTimeouts.maxRuntimeSeconds),
+    idleTimeoutSeconds: timeoutValue(values.get("--idle-timeout-seconds"), "--idle-timeout-seconds", profileTimeouts.idleTimeoutSeconds),
     heartbeatSeconds: positiveInteger(values.get("--heartbeat-seconds") ?? "30", "--heartbeat-seconds"),
     maxSubagents: positiveInteger(values.get("--max-subagents") ?? "10", "--max-subagents"),
     maxRepairRounds: positiveInteger(values.get("--max-repair-rounds") ?? "3", "--max-repair-rounds"),
@@ -194,11 +228,14 @@ function acquireLock(lockPath: string, runId: string): number {
 }
 
 function buildPrompt(task: string, options: Options): string {
+  const timeoutDescription = options.maxRuntimeSeconds === null && options.idleTimeoutSeconds === null
+    ? "外部协调器不设置总运行或空闲超时，但子代理数和修复轮数限制仍然有效。"
+    : `外部监控${options.maxRuntimeSeconds === null ? "不设置总运行时限" : `会在 ${options.maxRuntimeSeconds} 秒总时限后终止任务`}，${options.idleTimeoutSeconds === null ? "不设置空闲时限" : `并在连续 ${options.idleTimeoutSeconds} 秒无事件后终止任务`}。`;
   return `你是为 Codex 主代理工作的、边界受限的实现子代理。
 
 严格遵守下方任务契约。编辑前先检查仓库；实现要求的代码和测试，然后执行指定验证。不要提交、推送、重置、变基、切换分支、编辑密钥或删除无关工作。遇到阻塞或需求冲突时停止并报告。
 
-如果契约指定 oh-my-claudecode 工作流，必须实际调用准确的 OMC skill；一个会话只允许一个主循环控制者。不可用时报告阻塞，不要静默降级。最多启动 ${options.maxSubagents} 个子代理，最多进行 ${options.maxRepairRounds} 轮修复；达到边界时停止并报告。外部监控会在 ${options.maxRuntimeSeconds} 秒总时限或 ${options.idleTimeoutSeconds} 秒无事件后终止任务。
+如果契约指定 oh-my-claudecode 工作流，必须实际调用准确的 OMC skill；一个会话只允许一个主循环控制者。不可用时报告阻塞，不要静默降级。最多启动 ${options.maxSubagents} 个子代理，最多进行 ${options.maxRepairRounds} 轮修复；达到边界时停止并报告。${timeoutDescription}
 
 最终报告必须使用以下标题：
 任务摘要
@@ -256,6 +293,8 @@ async function run(): Promise<number> {
 
   const eventsPath = join(runDirectory, "events.jsonl");
   const hookEventsPath = join(runDirectory, "hook-events.jsonl");
+  const hookInboxPath = join(runDirectory, "hooks-inbox");
+  const hookRejectedPath = join(runDirectory, "hooks-rejected");
   const stderrPath = join(runDirectory, "stderr.log");
   const finalReportPath = join(runDirectory, "final-report.txt");
   const runStatusPath = join(runDirectory, "status.json");
@@ -263,18 +302,20 @@ async function run(): Promise<number> {
   for (const path of [eventsPath, hookEventsPath, stderrPath, finalReportPath]) {
     writeFileSync(path, "", { encoding: "utf8", mode: 0o600 });
   }
+  mkdirSync(hookInboxPath, { recursive: true, mode: 0o700 });
   const startedAtMs = Date.now();
   let lastEventAtMs = startedAtMs;
   let finalReport = "";
   let forcedState: RunState | undefined;
   let child: ChildProcessWithoutNullStreams | undefined;
-  let hookOffset = 0;
-  let hookRemainder = "";
   let polling = false;
   const agents = new Map<string, AgentStatus>();
+  const stoppedAgents = new Map<string, string>();
+  const toolActivities = new ToolActivityTracker();
+  const seenHookKeys = new Set<string>();
 
   const status: RunStatus = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     runId,
     projectRoot,
     runDirectory,
@@ -284,14 +325,32 @@ async function run(): Promise<number> {
     lastEventAt: new Date(startedAtMs).toISOString(),
     elapsedSeconds: 0,
     agents: [],
-    counters: { streamEvents: 0, hookEvents: 0, toolCalls: 0, subagentsStarted: 0 },
-    limits: {
+    counters: {
+      streamEvents: 0,
+      hookEvents: 0,
+      toolCalls: 0,
+      subagentsStarted: 0,
+      hookDuplicates: 0,
+      hookRejected: 0,
+    },
+    timeouts: {
+      profile: options.timeoutProfile,
       maxRuntimeSeconds: options.maxRuntimeSeconds,
       idleTimeoutSeconds: options.idleTimeoutSeconds,
+    },
+    limits: {
       maxSubagents: options.maxSubagents,
       maxRepairRounds: options.maxRepairRounds,
     },
-    files: { events: eventsPath, stderr: stderrPath, finalReport: finalReportPath, status: runStatusPath },
+    files: {
+      events: eventsPath,
+      hookEvents: hookEventsPath,
+      hookInbox: hookInboxPath,
+      hookRejected: hookRejectedPath,
+      stderr: stderrPath,
+      finalReport: finalReportPath,
+      status: runStatusPath,
+    },
   };
 
   const persistStatus = (): void => {
@@ -304,6 +363,18 @@ async function run(): Promise<number> {
     atomicWriteJson(currentStatusPath, status);
   };
 
+  const refreshCurrentActivity = (): void => {
+    const toolActivity = toolActivities.latest();
+    if (toolActivity) {
+      status.currentActivity = toolActivity;
+      return;
+    }
+    const runningAgent = [...agents.values()].reverse().find((agent) => agent.state === "running");
+    status.currentActivity = runningAgent
+      ? { kind: "subagent", label: runningAgent.type ?? runningAgent.id, agentId: runningAgent.id, startedAt: runningAgent.startedAt }
+      : undefined;
+  };
+
   const noteEvent = (event: NormalizedEvent): void => {
     lastEventAtMs = Date.now();
     appendJsonLine(eventsPath, event);
@@ -314,33 +385,50 @@ async function run(): Promise<number> {
       if (event.kind === "SubagentStart") {
         status.counters.subagentsStarted += 1;
         const agentId = event.agentId ?? `unknown-${status.counters.subagentsStarted}`;
-        agents.set(agentId, { id: agentId, type: event.agentType, state: "running", startedAt: event.timestamp });
-        status.currentActivity = { kind: "subagent", label: event.agentType ?? agentId, agentId, startedAt: event.timestamp };
+        const stoppedAt = stoppedAgents.get(agentId);
+        agents.set(agentId, {
+          id: agentId,
+          type: event.agentType,
+          state: stoppedAt ? "completed" : "running",
+          startedAt: event.timestamp,
+          endedAt: stoppedAt,
+        });
         if (status.counters.subagentsStarted > options.maxSubagents) {
           forcedState = "failed";
           status.failureReason = `子代理数量超过限制 ${options.maxSubagents}`;
           child?.kill("SIGTERM");
         }
       } else if (event.kind === "SubagentStop" && event.agentId) {
+        stoppedAgents.set(event.agentId, event.timestamp);
         const agent = agents.get(event.agentId);
         if (agent) agents.set(event.agentId, { ...agent, state: "completed", endedAt: event.timestamp, currentTool: undefined });
-        if (status.currentActivity?.agentId === event.agentId) status.currentActivity = undefined;
+        toolActivities.removeAgent(event.agentId);
       } else if (event.kind === "PreToolUse") {
         status.counters.toolCalls += 1;
-        status.currentActivity = {
+        toolActivities.start(event, {
           kind: "tool",
           label: event.summary ? `${event.toolName ?? "tool"}: ${event.summary}` : event.toolName ?? "tool",
+          eventId: event.eventId,
+          toolUseId: event.toolUseId,
           agentId: event.agentId,
           toolName: event.toolName,
           startedAt: event.timestamp,
-        };
+        });
         if (event.agentId) {
           const agent = agents.get(event.agentId);
-          if (agent) agents.set(event.agentId, { ...agent, currentTool: event.toolName });
+          const currentTool = toolActivities.latestForAgent(event.agentId)?.toolName;
+          if (agent) agents.set(event.agentId, { ...agent, currentTool });
         }
-      } else if ((event.kind === "PostToolUse" || event.kind === "PostToolUseFailure") && status.currentActivity?.kind === "tool") {
-        status.currentActivity = undefined;
+      } else if (event.kind === "PostToolUse" || event.kind === "PostToolUseFailure") {
+        const finishedActivity = toolActivities.finish(event);
+        const activityAgentId = event.agentId ?? finishedActivity?.agentId;
+        if (activityAgentId) {
+          const agent = agents.get(activityAgentId);
+          const currentTool = toolActivities.latestForAgent(activityAgentId)?.toolName;
+          if (agent) agents.set(activityAgentId, { ...agent, currentTool });
+        }
       }
+      refreshCurrentActivity();
     } else if (event.source === "claude-stream") {
       status.counters.streamEvents += 1;
     }
@@ -351,49 +439,61 @@ async function run(): Promise<number> {
     }
   };
 
-  const terminate = (state: "timed_out" | "failed", reason: string): void => {
+  const terminate = (state: "timed_out" | "failed", reason: string, timeoutKind?: TimeoutKind): void => {
     if (forcedState) return;
     forcedState = state;
     status.state = state;
     status.failureReason = reason;
-    noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: state, summary: reason });
+    const triggeredAt = new Date().toISOString();
+    if (timeoutKind) {
+      const limitSeconds = timeoutKind === "runtime" ? options.maxRuntimeSeconds : options.idleTimeoutSeconds;
+      if (limitSeconds !== null) status.timeout = { kind: timeoutKind, limitSeconds, triggeredAt };
+    }
+    noteEvent({ timestamp: triggeredAt, source: "runner", kind: timeoutKind ? `${timeoutKind}_timeout` : state, summary: reason });
     child?.kill("SIGTERM");
     setTimeout(() => {
       if (child && child.exitCode === null) child.kill("SIGKILL");
     }, 5000).unref();
   };
 
-  const pollHookEvents = (): void => {
-    if (polling || !existsSync(hookEventsPath)) return;
+  const pollHookEvents = (): number => {
+    if (polling) return 0;
     polling = true;
     try {
-      const size = statSync(hookEventsPath).size;
-      if (size < hookOffset) {
-        hookOffset = 0;
-        hookRemainder = "";
-      }
-      if (size === hookOffset) return;
-      const descriptor = openSync(hookEventsPath, "r");
-      try {
-        const buffer = Buffer.alloc(size - hookOffset);
-        const bytesRead = readSync(descriptor, buffer, 0, buffer.length, hookOffset);
-        hookOffset += bytesRead;
-        const pieces = `${hookRemainder}${buffer.subarray(0, bytesRead).toString("utf8")}`.split("\n");
-        hookRemainder = pieces.pop() ?? "";
-        for (const line of pieces) {
-          if (!line.trim()) continue;
-          try {
-            const event = normalizeHookEvent(JSON.parse(line));
-            if (event) noteEvent(event);
-          } catch {
-            noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: "invalid-hook-json", summary: "忽略无法解析的 hook 事件" });
-          }
-        }
-      } finally {
-        closeSync(descriptor);
-      }
+      const result = consumeHookInbox({
+        inboxDirectory: hookInboxPath,
+        rejectedDirectory: hookRejectedPath,
+        hookEventsPath,
+        seenKeys: seenHookKeys,
+        onEvent: noteEvent,
+        onDuplicate: () => {
+          status.counters.hookDuplicates += 1;
+          persistStatus();
+        },
+        onRejected: (fileName) => {
+          status.counters.hookRejected += 1;
+          noteEvent({
+            timestamp: new Date().toISOString(),
+            source: "runner",
+            kind: "invalid-hook-json",
+            summary: `隔离无法解析的 Hook 事件文件：${fileName}`,
+          });
+        },
+      });
+      return result.handled;
     } finally {
       polling = false;
+    }
+  };
+
+  const drainHookEvents = async (): Promise<void> => {
+    const deadline = Date.now() + 1_000;
+    let quietSince = Date.now();
+    while (Date.now() < deadline) {
+      const handled = pollHookEvents();
+      if (handled > 0) quietSince = Date.now();
+      if (Date.now() - quietSince >= 250) return;
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 50));
     }
   };
 
@@ -403,12 +503,13 @@ async function run(): Promise<number> {
     const activity = status.currentActivity?.label ?? "等待 Claude 事件";
     process.stderr.write(`[claude-coordinator] 心跳 · ${status.elapsedSeconds}s · ${status.state} · ${activity} · ${runDirectory}\n`);
   }, options.heartbeatSeconds * 1000);
-  const watchdogTimer = setInterval(() => {
+  const watchdogTimer = options.maxRuntimeSeconds === null && options.idleTimeoutSeconds === null ? undefined : setInterval(() => {
     const now = Date.now();
-    if (now - startedAtMs >= options.maxRuntimeSeconds * 1000) {
-      terminate("timed_out", `超过总运行时限 ${options.maxRuntimeSeconds} 秒`);
-    } else if (now - lastEventAtMs >= options.idleTimeoutSeconds * 1000) {
-      terminate("timed_out", `连续 ${options.idleTimeoutSeconds} 秒没有 Claude 或 hook 事件`);
+    const timeoutKind = timeoutKindAt(now, startedAtMs, lastEventAtMs, options);
+    if (timeoutKind === "runtime" && options.maxRuntimeSeconds !== null) {
+      terminate("timed_out", `超过总运行时限 ${options.maxRuntimeSeconds} 秒`, timeoutKind);
+    } else if (timeoutKind === "idle" && options.idleTimeoutSeconds !== null) {
+      terminate("timed_out", `连续 ${options.idleTimeoutSeconds} 秒没有 Claude 或 hook 事件`, timeoutKind);
     }
   }, 1000);
 
@@ -486,7 +587,8 @@ async function run(): Promise<number> {
         noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: "invalid-stream-json", summary: "忽略结尾处无法解析的 stream-json" });
       }
     }
-    pollHookEvents();
+    clearInterval(pollTimer);
+    await drainHookEvents();
 
     writeFileSync(finalReportPath, finalReport, { encoding: "utf8", mode: 0o600 });
     if (options.reportFile) {
@@ -513,7 +615,7 @@ async function run(): Promise<number> {
   } finally {
     clearInterval(pollTimer);
     clearInterval(heartbeatTimer);
-    clearInterval(watchdogTimer);
+    if (watchdogTimer) clearInterval(watchdogTimer);
     persistStatus();
     closeSync(lockDescriptor);
     rmSync(lockPath, { force: true });

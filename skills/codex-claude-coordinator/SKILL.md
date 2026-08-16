@@ -74,8 +74,7 @@ SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/codex-claude-coordinator"
 bash "$SKILL_DIR/scripts/delegate-to-claude.sh" \
   --workdir "$PWD" \
   --task-file "/absolute/path/to/task.md" \
-  --max-runtime-seconds 3600 \
-  --idle-timeout-seconds 900 \
+  --timeout-profile general \
   --heartbeat-seconds 30 \
   --max-subagents 10 \
   --max-repair-rounds 3
@@ -83,14 +82,17 @@ bash "$SKILL_DIR/scripts/delegate-to-claude.sh" \
 
 如果还需要把最终报告复制到指定位置，增加 `--report-file /absolute/path/to/report.txt`。仅当用户要求或批准相关限制时，才使用 `--model` 或 `--max-budget-usd`。
 
+启动前由 Codex 根据任务契约选择一个超时配置档：范围明确、文件少且验证快速时使用 `small`；普通多文件功能使用默认的 `general`；跨模块重构、打包、E2E 或慢速依赖任务使用 `heavy`。只有用户明确要求时才使用 `unlimited`；它仅关闭协调器的总时限和空闲时限，不关闭心跳、运行锁、子代理数或修复轮数限制。需要自定义时，用 `--max-runtime-seconds N|off` 和 `--idle-timeout-seconds N|off` 覆盖配置档。详细数值见 [references/runtime-monitoring.md](references/runtime-monitoring.md)。
+
 脚本使用 `stream-json` 和临时 Claude 观察插件监听会话、工具与子代理事件；该插件通过 `--plugin-dir` 加载，不改写 `~/.claude/settings.json`，也不替换 OMC 的现有 hooks。运行时：
 
 - 自动在项目 `.gitignore` 中加入 `/.codex/claude-coordinator/`；
+- 让各 Hook 原子写入独立 inbox 文件，再由 runner 按稳定顺序统一写入公共事件日志；
 - 将最新状态写入项目内 `.codex/claude-coordinator/status.json`；
 - 将本次 `events.jsonl`、`hook-events.jsonl`、`stderr.log`、`final-report.txt` 和快照 `status.json` 写入 `status.json` 的 `runDirectory`；
 - 在调用终端的标准错误持续打印重要工具事件与心跳，在标准输出仅打印最终报告；
 - 只报告 Claude 的运行状态、当前工具、子代理、耗时和最终结果；不要根据工具名称推断或管理 Claude/OMC 的内部工作阶段；
-- 超过总时限、空闲时限或子代理数量限制时终止 Claude，并保留失败状态与事件证据。
+- 超过已启用的总时限、空闲时限或子代理数量限制时终止 Claude，并保留失败状态与事件证据。
 
 等待期间直接读取 `.codex/claude-coordinator/status.json`，再按其中的 `files.events` 路径查看事件。不要通过 Claude 的文本输出推断隐藏思维过程；监听器不保存 prompt、thinking、工具完整响应，并对常见密钥和过长摘要做脱敏。字段、排障和依赖详见 [references/runtime-monitoring.md](references/runtime-monitoring.md)。
 
@@ -121,9 +123,9 @@ Codex 必须独立完成：
 - 审查发现涉及的文件；
 - 保留已通过行为并避免无关改动的要求。
 
-将修复任务委派给 Claude，然后重复独立验证。默认最多三轮，并同时用 `--max-repair-rounds` 把限制写入 Claude 契约；外部总时限仍是最终边界。除非用户明确要求继续，否则达到限制后停止，提供证据并报告尚未解决的阻塞问题。
+将修复任务委派给 Claude，然后重复独立验证。默认最多三轮，并同时用 `--max-repair-rounds` 把限制写入 Claude 契约；启用外部总时限时，它仍是最终时间边界。除非用户明确要求继续，否则达到限制后停止，提供证据并报告尚未解决的阻塞问题。
 
-失败集中在质量门禁时选择 `ultraqa`；需要单一负责人持续修复时才选择 `ralph`。`ralph` 也必须受总时限、空闲时限和修复轮数约束，不得无限延长。不得在已有 OMC 主循环仍活动时再启动另一个主循环。每轮修复继续使用对应测试或安全 Codex skill 独立复验。
+失败集中在质量门禁时选择 `ultraqa`；需要单一负责人持续修复时才选择 `ralph`。`ralph` 始终受修复轮数约束，并受当前配置档已启用的时间限制约束；`unlimited` 不表示允许无限修复。不得在已有 OMC 主循环仍活动时再启动另一个主循环。每轮修复继续使用对应测试或安全 Codex skill 独立复验。
 
 ### 7. 最终交付
 
