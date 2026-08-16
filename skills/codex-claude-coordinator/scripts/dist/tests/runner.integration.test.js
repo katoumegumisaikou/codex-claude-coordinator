@@ -33,15 +33,19 @@ test("runner persists project-local status, events, hooks, logs, and report", ()
         assert.match(readFileSync(join(project, ".gitignore"), "utf8"), /\/\.codex\/claude-coordinator\//);
         const coordinatorRoot = join(project, ".codex", "claude-coordinator");
         const status = JSON.parse(readFileSync(join(coordinatorRoot, "status.json"), "utf8"));
+        assert.equal(status.schemaVersion, 2);
         assert.equal(status.state, "completed");
-        assert.equal(status.phaseLabel, "交付");
+        assert.equal("phase" in status, false);
+        assert.equal("phaseLabel" in status, false);
         assert.equal(status.counters.subagentsStarted, 1);
         assert.equal(status.counters.hookEvents, 5);
         assert.equal(status.limits.maxSubagents, 10);
         assert.equal(existsSync(status.files.events), true);
         assert.equal(existsSync(status.files.finalReport), true);
         assert.equal(existsSync(status.files.status), true);
-        assert.match(readFileSync(status.files.events, "utf8"), /"kind":"SubagentStart"/);
+        const events = readFileSync(status.files.events, "utf8");
+        assert.match(events, /"kind":"SubagentStart"/);
+        assert.doesNotMatch(events, /"phase(?:Label)?"/);
         assert.match(readFileSync(status.files.finalReport, "utf8"), /阻塞问题\n无/);
         assert.equal(existsSync(join(coordinatorRoot, "active.lock")), false);
     }

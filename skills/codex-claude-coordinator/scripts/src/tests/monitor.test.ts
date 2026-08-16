@@ -8,8 +8,6 @@ import {
   extractFinalReport,
   normalizeHookEvent,
   normalizeStreamEvent,
-  phaseForTool,
-  phaseLabel,
   redactText,
   reportIndicatesBlocker,
   sanitizeValue,
@@ -49,7 +47,6 @@ test("normalizes hook events without preserving full tool input", () => {
     toolName: "Bash",
     toolInputSummary: "npm test token=abc123",
   });
-  assert.equal(event?.phase, "verify");
   assert.equal(event?.toolName, "Bash");
   assert.equal(event?.summary, "npm test token=[REDACTED]");
 });
@@ -59,24 +56,10 @@ test("normalizes tool-use stream events and extracts only the final result", () 
     type: "stream_event",
     event: { type: "content_block_start", content_block: { type: "tool_use", name: "Edit", input: { file_path: "src/App.tsx" } } },
   });
-  assert.equal(event?.phase, "execute");
   assert.equal(event?.toolName, "Edit");
   assert.equal(normalizeStreamEvent({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "hidden" } } }), undefined);
   assert.equal(extractFinalReport({ type: "assistant", result: "wrong" }), undefined);
   assert.equal(extractFinalReport({ type: "result", result: "done" }), "done");
-});
-
-test("maps common commands to generic phases", () => {
-  assert.equal(phaseForTool("Read"), "discover");
-  assert.equal(phaseForTool("TaskCreate"), "plan");
-  assert.equal(phaseForTool("Bash", "npm run build"), "verify");
-  assert.equal(phaseForTool("Bash", "mkdir output"), "execute");
-  assert.equal(phaseLabel("preflight"), "预检");
-  assert.equal(phaseLabel("discover"), "调研");
-  assert.equal(phaseLabel("plan"), "规划");
-  assert.equal(phaseLabel("execute"), "实现");
-  assert.equal(phaseLabel("verify"), "验证");
-  assert.equal(phaseLabel("deliver"), "交付");
 });
 
 test("detects substantive blocker reports", () => {

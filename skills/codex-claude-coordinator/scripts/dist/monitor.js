@@ -1,17 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-const PHASE_LABELS = {
-    queued: "排队",
-    preflight: "预检",
-    discover: "调研",
-    plan: "规划",
-    execute: "实现",
-    verify: "验证",
-    deliver: "交付",
-};
-export function phaseLabel(phase) {
-    return PHASE_LABELS[phase];
-}
 const SECRET_KEY = /(?:authorization|cookie|credential|password|passwd|secret|token|api[_-]?key|private[_-]?key)/i;
 const OMITTED_KEY = /^(?:thinking|signature|prompt|transcript_path|tool_response|full_content)$/i;
 export function isRecord(value) {
@@ -97,22 +85,6 @@ export function ensureRuntimeIgnored(projectRoot) {
     writeFileSync(ignorePath, `${existing}${prefix}${addition}`, "utf8");
     return true;
 }
-function verifyCommand(summary) {
-    return /(?:^|\s)(?:test|tests|lint|typecheck|check|build|verify|vitest|jest|pytest|playwright|go test|cargo test|tsc)(?:\s|$)/i.test(summary);
-}
-export function phaseForTool(toolName, summary = "") {
-    if (!toolName)
-        return undefined;
-    if (/^(?:Read|Glob|Grep|LS|WebSearch|WebFetch)$/i.test(toolName))
-        return "discover";
-    if (/^(?:TaskCreate|TaskUpdate|EnterPlanMode|ExitPlanMode)$/i.test(toolName))
-        return "plan";
-    if (/^(?:Write|Edit|MultiEdit|NotebookEdit|Task|Agent)$/i.test(toolName))
-        return "execute";
-    if (/^(?:Bash|Shell)$/i.test(toolName))
-        return verifyCommand(summary) ? "verify" : "execute";
-    return "execute";
-}
 function safeToolSummary(raw) {
     const supplied = stringField(raw, "summary", "toolInputSummary", "tool_input_summary");
     if (supplied)
@@ -135,18 +107,10 @@ export function normalizeHookEvent(raw, timestamp = new Date().toISOString()) {
         return undefined;
     const toolName = stringField(raw, "toolName", "tool_name");
     const summary = safeToolSummary(raw);
-    let phase = phaseForTool(toolName, summary);
-    if (hookName === "SessionStart")
-        phase = "discover";
-    if (hookName === "SubagentStart" && /plan/i.test(stringField(raw, "agentType", "agent_type") ?? ""))
-        phase = "plan";
-    if (hookName === "Stop")
-        phase = "deliver";
     return {
         timestamp: stringField(raw, "timestamp") ?? timestamp,
         source: "claude-hook",
         kind: hookName,
-        phase,
         sessionId: stringField(raw, "sessionId", "session_id"),
         agentId: stringField(raw, "agentId", "agent_id"),
         agentType: stringField(raw, "agentType", "agent_type"),
@@ -169,16 +133,13 @@ export function normalizeStreamEvent(raw, timestamp = new Date().toISOString()) 
         return undefined;
     const type = stringField(raw, "type") ?? "unknown";
     let kind = type;
-    let phase;
     let toolName;
     let summary;
     if (type === "system") {
         kind = stringField(raw, "subtype") ? `system:${stringField(raw, "subtype")}` : type;
-        phase = "discover";
     }
     else if (type === "result") {
         kind = stringField(raw, "subtype") ? `result:${stringField(raw, "subtype")}` : type;
-        phase = "deliver";
     }
     else if (type === "stream_event") {
         const event = nestedRecord(raw, "event");
@@ -190,7 +151,6 @@ export function normalizeStreamEvent(raw, timestamp = new Date().toISOString()) 
         if (stringField(contentBlock, "type") === "tool_use") {
             toolName = stringField(contentBlock, "name");
             summary = safeToolSummary({ tool_input: contentBlock?.input });
-            phase = phaseForTool(toolName, summary);
         }
     }
     else if (/hook/i.test(type)) {
@@ -205,7 +165,6 @@ export function normalizeStreamEvent(raw, timestamp = new Date().toISOString()) 
         timestamp,
         source: "claude-stream",
         kind,
-        phase,
         sessionId: stringField(raw, "session_id"),
         toolName,
         summary,

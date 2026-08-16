@@ -12,12 +12,10 @@ import {
   normalizeHookEvent,
   normalizeStreamEvent,
   numberField,
-  phaseLabel,
   redactText,
   reportIndicatesBlocker,
   stringField,
   type NormalizedEvent,
-  type RunPhase,
   type RunState,
 } from "./monitor.js";
 
@@ -55,13 +53,11 @@ interface Activity {
 }
 
 interface RunStatus {
-  schemaVersion: 1;
+  schemaVersion: 2;
   runId: string;
   projectRoot: string;
   runDirectory: string;
   state: RunState;
-  phase: RunPhase;
-  phaseLabel: string;
   startedAt: string;
   updatedAt: string;
   lastEventAt: string;
@@ -278,13 +274,11 @@ async function run(): Promise<number> {
   const agents = new Map<string, AgentStatus>();
 
   const status: RunStatus = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId,
     projectRoot,
     runDirectory,
     state: "queued",
-    phase: "queued",
-    phaseLabel: phaseLabel("queued"),
     startedAt: new Date(startedAtMs).toISOString(),
     updatedAt: new Date(startedAtMs).toISOString(),
     lastEventAt: new Date(startedAtMs).toISOString(),
@@ -303,7 +297,6 @@ async function run(): Promise<number> {
   const persistStatus = (): void => {
     const now = Date.now();
     status.updatedAt = new Date(now).toISOString();
-    status.phaseLabel = phaseLabel(status.phase);
     status.lastEventAt = new Date(lastEventAtMs).toISOString();
     status.elapsedSeconds = Math.max(0, Math.round((now - startedAtMs) / 1000));
     status.agents = [...agents.values()];
@@ -313,9 +306,8 @@ async function run(): Promise<number> {
 
   const noteEvent = (event: NormalizedEvent): void => {
     lastEventAtMs = Date.now();
-    appendJsonLine(eventsPath, { ...event, phaseLabel: event.phase ? phaseLabel(event.phase) : undefined });
+    appendJsonLine(eventsPath, event);
     if (event.sessionId) status.sessionId = event.sessionId;
-    if (event.phase) status.phase = event.phase;
 
     if (event.source === "claude-hook") {
       status.counters.hookEvents += 1;
@@ -355,7 +347,7 @@ async function run(): Promise<number> {
 
     persistStatus();
     if (["PreToolUse", "SubagentStart", "SubagentStop", "PostToolUseFailure"].includes(event.kind)) {
-      process.stderr.write(`[claude-coordinator] ${status.phaseLabel} · ${event.kind}${event.toolName ? ` ${event.toolName}` : ""}${event.summary ? ` · ${event.summary}` : ""}\n`);
+      process.stderr.write(`[claude-coordinator] ${event.kind}${event.toolName ? ` ${event.toolName}` : ""}${event.summary ? ` · ${event.summary}` : ""}\n`);
     }
   };
 
@@ -409,7 +401,7 @@ async function run(): Promise<number> {
   const heartbeatTimer = setInterval(() => {
     persistStatus();
     const activity = status.currentActivity?.label ?? "等待 Claude 事件";
-    process.stderr.write(`[claude-coordinator] 心跳 · ${status.elapsedSeconds}s · ${status.phaseLabel} · ${activity} · ${runDirectory}\n`);
+    process.stderr.write(`[claude-coordinator] 心跳 · ${status.elapsedSeconds}s · ${status.state} · ${activity} · ${runDirectory}\n`);
   }, options.heartbeatSeconds * 1000);
   const watchdogTimer = setInterval(() => {
     const now = Date.now();
@@ -422,9 +414,8 @@ async function run(): Promise<number> {
 
   try {
     status.state = "running";
-    status.phase = "preflight";
     status.currentActivity = { kind: "runner", label: "启动 Claude Code", startedAt: new Date().toISOString() };
-    noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: "started", phase: "preflight", summary: runId });
+    noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: "started", summary: runId });
 
     const runnerDirectory = dirname(fileURLToPath(import.meta.url));
     const pluginDirectory = resolve(runnerDirectory, "..", "..", "claude-observer");
@@ -505,20 +496,19 @@ async function run(): Promise<number> {
     if (finalReport) process.stdout.write(finalReport.endsWith("\n") ? finalReport : `${finalReport}\n`);
 
     status.currentActivity = undefined;
-    status.phase = "deliver";
     if (forcedState) status.state = forcedState;
     else if (exitCode !== 0) {
       status.state = "failed";
       status.failureReason = `Claude Code 退出码：${exitCode ?? "signal"}`;
     } else if (reportIndicatesBlocker(finalReport)) status.state = "blocked";
     else status.state = "completed";
-    noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: status.state, phase: "deliver", summary: status.failureReason });
+    noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: status.state, summary: status.failureReason });
     return status.state === "completed" ? 0 : status.state === "blocked" ? 3 : status.state === "timed_out" ? 124 : 1;
   } catch (error) {
     status.currentActivity = undefined;
     status.state = forcedState ?? "failed";
     status.failureReason = error instanceof Error ? error.message : String(error);
-    noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: status.state, phase: status.phase, summary: status.failureReason });
+    noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: status.state, summary: status.failureReason });
     throw error;
   } finally {
     clearInterval(pollTimer);

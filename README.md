@@ -8,7 +8,7 @@
 - 将实现工作委派给 Claude Code，同时禁止其提交、推送、重置、变基、切换分支或修改密钥。
 - 在 Claude Code 已安装 oh-my-claudecode（OMC）时，为任务选择并约束 `autopilot`、`ralph`、`team`、`ultrawork` 或 `ultraqa` 工作流。
 - 保持单写入者原则；只有只读任务或独立 worktree 中的任务才允许并行。
-- 通过 Claude `stream-json` 与临时观察插件实时跟踪工具调用、OMC 子代理、阶段、耗时和阻塞状态。
+- 通过 Claude `stream-json` 与临时观察插件实时跟踪工具调用、OMC 子代理、耗时和最终状态。
 - 使用心跳、总运行时限、空闲时限、最大子代理数和最大修复轮数约束长时间任务，包括 `ralph`。
 - 将 Claude 的报告视为待验证声明，由 Codex 独立检查 diff、重跑测试并决定是否验收。
 - 验收失败时生成包含失败证据的修复契约，并进行有上限的修复循环。
@@ -20,7 +20,7 @@ Codex：分析、建立基线、编写任务契约
    ↓
 Claude Code / OMC：实现和自测
    ↕ stream-json + hooks
-项目内状态：阶段、工具、子代理、心跳、事件与日志
+项目内状态：运行状态、当前活动、子代理、心跳、事件与日志
    ↓
 Codex：审查差异、独立验证
    ├─ 通过 → 交付
@@ -188,9 +188,9 @@ Claude stdout ── stream-json ────────────┐
 Claude hooks ── hook-events.jsonl ───────┘
 ```
 
-观察插件记录会话、工具调用、工具失败、子代理启动/停止、通知和结束事件。`Read`、`Glob`、`Grep`、`Edit`、`Write`、`Bash` 等是 Hook 中报告的 Claude Code 工具名称；协调器只读取这些名称来推断阶段，不负责执行工具。
+观察插件记录会话、工具调用、工具失败、子代理启动/停止、通知和结束事件。`Read`、`Glob`、`Grep`、`Edit`、`Write`、`Bash` 等只是 Hook 报告的 Claude Code 工具名称；协调器据此记录已经发生的客观活动，不负责执行工具，也不把工具名称映射为 Claude/OMC 的内部工作阶段。
 
-阶段映射为“预检 → 调研 → 规划 → 实现 → 验证 → 交付”。Hook 文件每 500 毫秒检查一次，超时条件每秒检查一次，心跳默认每 30 秒输出一次。逐 token 文本和思考增量不会持久化。
+`PreToolUse` 设置 `currentActivity`，`PostToolUse` 或 `PostToolUseFailure` 清除对应活动，`SubagentStart` 和 `SubagentStop` 更新 `agents`。Hook 文件每 500 毫秒检查一次，超时条件每秒检查一次，心跳默认每 30 秒输出一次。逐 token 文本和思考增量不会持久化。
 
 ### 8. 协调器保存项目内状态
 
@@ -262,7 +262,9 @@ Claude 结束后，Codex 检查完整 diff、所有新增文件、范围合规�
 cat .codex/claude-coordinator/status.json
 ```
 
-`status.json` 的 `currentActivity`、`agents`、`lastEventAt` 和 `files.events` 可用于判断 Claude 正在调查、实现、验证、等待 API，还是运行 OMC 子代理。`phaseLabel` 使用“预检 → 调研 → 规划 → 实现 → 验证 → 交付”的中文描述；阶段由可观察事件推断，不读取或展示模型隐藏思维链。
+`status.json` 的 `state`、`currentActivity`、`agents`、`lastEventAt` 和 `files.events` 用于展示 Claude 的运行结果、当前工具、子代理和最近事件。结合 `stderr.log` 可以排查 API 等待或工具阻塞，但协调器不会据此推断 Claude/OMC 的计划或内部阶段。
+
+从 `schemaVersion: 2` 起，`status.json` 和 `events.jsonl` 不再包含 `phase` 或 `phaseLabel`。读取状态的工具应使用 `state` 判断结果，并使用 `currentActivity`、`agents`、时间戳和事件记录展示客观活动。旧运行目录中的 schema v1 文件是历史快照，不会被自动改写。
 
 ## 开发与验证
 

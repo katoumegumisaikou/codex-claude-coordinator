@@ -89,7 +89,7 @@ bash "$SKILL_DIR/scripts/delegate-to-claude.sh" \
 - 将最新状态写入项目内 `.codex/claude-coordinator/status.json`；
 - 将本次 `events.jsonl`、`hook-events.jsonl`、`stderr.log`、`final-report.txt` 和快照 `status.json` 写入 `status.json` 的 `runDirectory`；
 - 在调用终端的标准错误持续打印重要工具事件与心跳，在标准输出仅打印最终报告；
-- 使用通用阶段“预检 → 调研 → 规划 → 实现 → 验证 → 交付”，不依赖 npm、Electron 或任何特定项目命令；
+- 只报告 Claude 的运行状态、当前工具、子代理、耗时和最终结果；不要根据工具名称推断或管理 Claude/OMC 的内部工作阶段；
 - 超过总时限、空闲时限或子代理数量限制时终止 Claude，并保留失败状态与事件证据。
 
 等待期间直接读取 `.codex/claude-coordinator/status.json`，再按其中的 `files.events` 路径查看事件。不要通过 Claude 的文本输出推断隐藏思维过程；监听器不保存 prompt、thinking、工具完整响应，并对常见密钥和过长摘要做脱敏。字段、排障和依赖详见 [references/runtime-monitoring.md](references/runtime-monitoring.md)。

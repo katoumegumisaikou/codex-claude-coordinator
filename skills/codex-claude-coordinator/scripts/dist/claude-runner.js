@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendJsonLine, atomicWriteJson, createRunId, ensureRuntimeIgnored, extractFinalReport, isRecord, normalizeHookEvent, normalizeStreamEvent, numberField, phaseLabel, redactText, reportIndicatesBlocker, stringField, } from "./monitor.js";
+import { appendJsonLine, atomicWriteJson, createRunId, ensureRuntimeIgnored, extractFinalReport, isRecord, normalizeHookEvent, normalizeStreamEvent, numberField, redactText, reportIndicatesBlocker, stringField, } from "./monitor.js";
 const usage = `用法：delegate-to-claude.sh --workdir DIR --task-file FILE [选项]
 
 选项：
@@ -189,13 +189,11 @@ async function run() {
     let polling = false;
     const agents = new Map();
     const status = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         runId,
         projectRoot,
         runDirectory,
         state: "queued",
-        phase: "queued",
-        phaseLabel: phaseLabel("queued"),
         startedAt: new Date(startedAtMs).toISOString(),
         updatedAt: new Date(startedAtMs).toISOString(),
         lastEventAt: new Date(startedAtMs).toISOString(),
@@ -213,7 +211,6 @@ async function run() {
     const persistStatus = () => {
         const now = Date.now();
         status.updatedAt = new Date(now).toISOString();
-        status.phaseLabel = phaseLabel(status.phase);
         status.lastEventAt = new Date(lastEventAtMs).toISOString();
         status.elapsedSeconds = Math.max(0, Math.round((now - startedAtMs) / 1000));
         status.agents = [...agents.values()];
@@ -222,11 +219,9 @@ async function run() {
     };
     const noteEvent = (event) => {
         lastEventAtMs = Date.now();
-        appendJsonLine(eventsPath, { ...event, phaseLabel: event.phase ? phaseLabel(event.phase) : undefined });
+        appendJsonLine(eventsPath, event);
         if (event.sessionId)
             status.sessionId = event.sessionId;
-        if (event.phase)
-            status.phase = event.phase;
         if (event.source === "claude-hook") {
             status.counters.hookEvents += 1;
             if (event.kind === "SubagentStart") {
@@ -271,7 +266,7 @@ async function run() {
         }
         persistStatus();
         if (["PreToolUse", "SubagentStart", "SubagentStop", "PostToolUseFailure"].includes(event.kind)) {
-            process.stderr.write(`[claude-coordinator] ${status.phaseLabel} · ${event.kind}${event.toolName ? ` ${event.toolName}` : ""}${event.summary ? ` · ${event.summary}` : ""}\n`);
+            process.stderr.write(`[claude-coordinator] ${event.kind}${event.toolName ? ` ${event.toolName}` : ""}${event.summary ? ` · ${event.summary}` : ""}\n`);
         }
     };
     const terminate = (state, reason) => {
@@ -331,7 +326,7 @@ async function run() {
     const heartbeatTimer = setInterval(() => {
         persistStatus();
         const activity = status.currentActivity?.label ?? "等待 Claude 事件";
-        process.stderr.write(`[claude-coordinator] 心跳 · ${status.elapsedSeconds}s · ${status.phaseLabel} · ${activity} · ${runDirectory}\n`);
+        process.stderr.write(`[claude-coordinator] 心跳 · ${status.elapsedSeconds}s · ${status.state} · ${activity} · ${runDirectory}\n`);
     }, options.heartbeatSeconds * 1000);
     const watchdogTimer = setInterval(() => {
         const now = Date.now();
@@ -344,9 +339,8 @@ async function run() {
     }, 1000);
     try {
         status.state = "running";
-        status.phase = "preflight";
         status.currentActivity = { kind: "runner", label: "启动 Claude Code", startedAt: new Date().toISOString() };
-        noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: "started", phase: "preflight", summary: runId });
+        noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: "started", summary: runId });
         const runnerDirectory = dirname(fileURLToPath(import.meta.url));
         const pluginDirectory = resolve(runnerDirectory, "..", "..", "claude-observer");
         const claudeCommand = process.env.CLAUDE_COORDINATOR_CLAUDE_COMMAND ?? "claude";
@@ -430,7 +424,6 @@ async function run() {
         if (finalReport)
             process.stdout.write(finalReport.endsWith("\n") ? finalReport : `${finalReport}\n`);
         status.currentActivity = undefined;
-        status.phase = "deliver";
         if (forcedState)
             status.state = forcedState;
         else if (exitCode !== 0) {
@@ -441,14 +434,14 @@ async function run() {
             status.state = "blocked";
         else
             status.state = "completed";
-        noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: status.state, phase: "deliver", summary: status.failureReason });
+        noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: status.state, summary: status.failureReason });
         return status.state === "completed" ? 0 : status.state === "blocked" ? 3 : status.state === "timed_out" ? 124 : 1;
     }
     catch (error) {
         status.currentActivity = undefined;
         status.state = forcedState ?? "failed";
         status.failureReason = error instanceof Error ? error.message : String(error);
-        noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: status.state, phase: status.phase, summary: status.failureReason });
+        noteEvent({ timestamp: new Date().toISOString(), source: "runner", kind: status.state, summary: status.failureReason });
         throw error;
     }
     finally {

@@ -2,27 +2,11 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync
 import { dirname, join } from "node:path";
 
 export type RunState = "queued" | "running" | "completed" | "blocked" | "failed" | "timed_out";
-export type RunPhase = "queued" | "preflight" | "discover" | "plan" | "execute" | "verify" | "deliver";
-
-const PHASE_LABELS: Record<RunPhase, string> = {
-  queued: "排队",
-  preflight: "预检",
-  discover: "调研",
-  plan: "规划",
-  execute: "实现",
-  verify: "验证",
-  deliver: "交付",
-};
-
-export function phaseLabel(phase: RunPhase): string {
-  return PHASE_LABELS[phase];
-}
 
 export interface NormalizedEvent {
   timestamp: string;
   source: "runner" | "claude-stream" | "claude-hook";
   kind: string;
-  phase?: RunPhase;
   sessionId?: string;
   agentId?: string;
   agentType?: string;
@@ -114,19 +98,6 @@ export function ensureRuntimeIgnored(projectRoot: string): boolean {
   return true;
 }
 
-function verifyCommand(summary: string): boolean {
-  return /(?:^|\s)(?:test|tests|lint|typecheck|check|build|verify|vitest|jest|pytest|playwright|go test|cargo test|tsc)(?:\s|$)/i.test(summary);
-}
-
-export function phaseForTool(toolName: string | undefined, summary = ""): RunPhase | undefined {
-  if (!toolName) return undefined;
-  if (/^(?:Read|Glob|Grep|LS|WebSearch|WebFetch)$/i.test(toolName)) return "discover";
-  if (/^(?:TaskCreate|TaskUpdate|EnterPlanMode|ExitPlanMode)$/i.test(toolName)) return "plan";
-  if (/^(?:Write|Edit|MultiEdit|NotebookEdit|Task|Agent)$/i.test(toolName)) return "execute";
-  if (/^(?:Bash|Shell)$/i.test(toolName)) return verifyCommand(summary) ? "verify" : "execute";
-  return "execute";
-}
-
 function safeToolSummary(raw: Record<string, unknown>): string | undefined {
   const supplied = stringField(raw, "summary", "toolInputSummary", "tool_input_summary");
   if (supplied) return redactText(supplied, 240);
@@ -145,16 +116,11 @@ export function normalizeHookEvent(raw: unknown, timestamp = new Date().toISOStr
   if (!hookName) return undefined;
   const toolName = stringField(raw, "toolName", "tool_name");
   const summary = safeToolSummary(raw);
-  let phase = phaseForTool(toolName, summary);
-  if (hookName === "SessionStart") phase = "discover";
-  if (hookName === "SubagentStart" && /plan/i.test(stringField(raw, "agentType", "agent_type") ?? "")) phase = "plan";
-  if (hookName === "Stop") phase = "deliver";
 
   return {
     timestamp: stringField(raw, "timestamp") ?? timestamp,
     source: "claude-hook",
     kind: hookName,
-    phase,
     sessionId: stringField(raw, "sessionId", "session_id"),
     agentId: stringField(raw, "agentId", "agent_id"),
     agentType: stringField(raw, "agentType", "agent_type"),
@@ -177,16 +143,13 @@ export function normalizeStreamEvent(raw: unknown, timestamp = new Date().toISOS
   if (!isRecord(raw)) return undefined;
   const type = stringField(raw, "type") ?? "unknown";
   let kind = type;
-  let phase: RunPhase | undefined;
   let toolName: string | undefined;
   let summary: string | undefined;
 
   if (type === "system") {
     kind = stringField(raw, "subtype") ? `system:${stringField(raw, "subtype")}` : type;
-    phase = "discover";
   } else if (type === "result") {
     kind = stringField(raw, "subtype") ? `result:${stringField(raw, "subtype")}` : type;
-    phase = "deliver";
   } else if (type === "stream_event") {
     const event = nestedRecord(raw, "event");
     const eventType = stringField(event, "type");
@@ -196,7 +159,6 @@ export function normalizeStreamEvent(raw: unknown, timestamp = new Date().toISOS
     if (stringField(contentBlock, "type") === "tool_use") {
       toolName = stringField(contentBlock, "name");
       summary = safeToolSummary({ tool_input: contentBlock?.input });
-      phase = phaseForTool(toolName, summary);
     }
   } else if (/hook/i.test(type)) {
     kind = type;
@@ -211,7 +173,6 @@ export function normalizeStreamEvent(raw: unknown, timestamp = new Date().toISOS
     timestamp,
     source: "claude-stream",
     kind,
-    phase,
     sessionId: stringField(raw, "session_id"),
     toolName,
     summary,

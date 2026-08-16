@@ -2,7 +2,7 @@
 
 ## 作用
 
-协调器借鉴 OMC 的可观察任务管理方式，但不复制其内部状态。它同时消费 Claude `stream-json` 输出和一个会话级临时观察插件产生的 hooks，从而显示当前阶段、工具、子代理、耗时、空闲时间及最终结果。Codex 仍负责审查和验收。
+协调器借鉴 OMC 的可观察任务管理方式，但不复制或推断其内部工作流。它同时消费 Claude `stream-json` 输出和一个会话级临时观察插件产生的 hooks，从而显示运行状态、当前工具、子代理、耗时、空闲时间及最终结果。Codex 仍负责审查和验收。
 
 观察插件通过 `--plugin-dir` 加载，和用户/OMC 已有 hooks 并存；不会写入或替换 `~/.claude/settings.json`。
 
@@ -36,16 +36,13 @@ Claude 进程使用：
 
 监听器只保留可观察元数据和有限摘要，不保存 prompt、thinking、transcript 路径或完整工具响应。常见 token、API key、密码模式会被替换；最终报告仍应遵守任务契约中的密钥禁令。
 
-## 通用阶段
+## 观测边界
 
-- 预检：创建运行目录、锁和启动参数。
-- 调研：读文件、搜索和仓库调查。
-- 规划：任务列表或计划工具活动。
-- 实现：编辑、写文件、普通命令或实现子代理。
-- 验证：测试、lint、typecheck、build 等命令。
-- 交付：最终报告、完成、阻塞或失败。
+协调器只记录 Claude 与外部工具之间可观察的事实，例如 `state`、`currentActivity`、`agents`、`lastEventAt`、计数器和最终结果。它不把 Read、Edit、Bash 或子代理类型映射为内部阶段，也不要求 Claude 暴露 OMC 的工作流状态。
 
-阶段根据事件和工具名称推断，适用于不同语言和构建系统，不表示模型的隐藏思维过程。`status.json` 使用 `phaseLabel` 展示中文阶段；`phase` 保留稳定的英文机器值，便于脚本兼容。
+从 `schemaVersion: 2` 起，`status.json` 和 `events.jsonl` 不再包含 `phase` 或 `phaseLabel`。状态消费者应根据 `state` 判断运行结果，根据 `currentActivity`、`agents`、时间戳和事件记录展示客观活动；不得从工具名称反推出 Claude 的计划或内部阶段。
+
+Codex 根据任务契约、工作树差异和独立验证决定是否验收或续跑；Claude/OMC 自行管理其内部计划、循环和角色分工。
 
 ## 限制与退出码
 
@@ -68,7 +65,7 @@ Claude 进程使用：
 
 ## 快速排障
 
-1. 读取 `<project>/.codex/claude-coordinator/status.json`，确认 `state`、`phase`、`lastEventAt` 和 `currentActivity`。
+1. 读取 `<project>/.codex/claude-coordinator/status.json`，确认 `state`、`lastEventAt` 和 `currentActivity`。
 2. 读取 `files.events` 查看最后一个 hook 或 stream 事件。
 3. 读取 `files.stderr` 判断 CLI、网络、认证或 hook 错误。
 4. 若 `lastEventAt` 持续不变，等待空闲时限自动终止，或手动终止外层脚本；不要启动第二个写入任务绕过锁。
