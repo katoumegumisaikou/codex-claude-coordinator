@@ -34,6 +34,7 @@ test("runner persists project-local status, events, hooks, logs, and report", ()
         const coordinatorRoot = join(project, ".codex", "claude-coordinator");
         const status = JSON.parse(readFileSync(join(coordinatorRoot, "status.json"), "utf8"));
         assert.equal(status.state, "completed");
+        assert.equal(status.phaseLabel, "交付");
         assert.equal(status.counters.subagentsStarted, 1);
         assert.equal(status.counters.hookEvents, 5);
         assert.equal(existsSync(status.files.events), true);

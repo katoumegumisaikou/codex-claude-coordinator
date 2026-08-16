@@ -147,7 +147,7 @@ bash "$SKILL_DIR/scripts/delegate-to-claude.sh" \
 cat .codex/claude-coordinator/status.json
 ```
 
-`status.json` 的 `currentActivity`、`agents`、`lastEventAt` 和 `files.events` 可用于判断 Claude 正在调查、实现、验证、等待 API，还是运行 OMC 子代理。阶段是由可观察事件推断的通用阶段，不读取或展示模型隐藏思维链。
+`status.json` 的 `currentActivity`、`agents`、`lastEventAt` 和 `files.events` 可用于判断 Claude 正在调查、实现、验证、等待 API，还是运行 OMC 子代理。`phaseLabel` 使用“预检 → 调研 → 规划 → 实现 → 验证 → 交付”的中文描述；阶段由可观察事件推断，不读取或展示模型隐藏思维链。
 
 ## 开发与验证
 

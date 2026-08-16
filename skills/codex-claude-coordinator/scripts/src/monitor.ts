@@ -4,6 +4,20 @@ import { dirname, join } from "node:path";
 export type RunState = "queued" | "running" | "completed" | "blocked" | "failed" | "timed_out";
 export type RunPhase = "queued" | "preflight" | "discover" | "plan" | "execute" | "verify" | "deliver";
 
+const PHASE_LABELS: Record<RunPhase, string> = {
+  queued: "排队",
+  preflight: "预检",
+  discover: "调研",
+  plan: "规划",
+  execute: "实现",
+  verify: "验证",
+  deliver: "交付",
+};
+
+export function phaseLabel(phase: RunPhase): string {
+  return PHASE_LABELS[phase];
+}
+
 export interface NormalizedEvent {
   timestamp: string;
   source: "runner" | "claude-stream" | "claude-hook";

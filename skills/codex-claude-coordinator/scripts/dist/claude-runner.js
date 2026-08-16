@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendJsonLine, atomicWriteJson, createRunId, ensureRuntimeIgnored, extractFinalReport, isRecord, normalizeHookEvent, normalizeStreamEvent, numberField, redactText, reportIndicatesBlocker, stringField, } from "./monitor.js";
+import { appendJsonLine, atomicWriteJson, createRunId, ensureRuntimeIgnored, extractFinalReport, isRecord, normalizeHookEvent, normalizeStreamEvent, numberField, phaseLabel, redactText, reportIndicatesBlocker, stringField, } from "./monitor.js";
 const usage = `用法：delegate-to-claude.sh --workdir DIR --task-file FILE [选项]
 
 选项：
@@ -195,6 +195,7 @@ async function run() {
         runDirectory,
         state: "queued",
         phase: "queued",
+        phaseLabel: phaseLabel("queued"),
         startedAt: new Date(startedAtMs).toISOString(),
         updatedAt: new Date(startedAtMs).toISOString(),
         lastEventAt: new Date(startedAtMs).toISOString(),
@@ -212,6 +213,7 @@ async function run() {
     const persistStatus = () => {
         const now = Date.now();
         status.updatedAt = new Date(now).toISOString();
+        status.phaseLabel = phaseLabel(status.phase);
         status.lastEventAt = new Date(lastEventAtMs).toISOString();
         status.elapsedSeconds = Math.max(0, Math.round((now - startedAtMs) / 1000));
         status.agents = [...agents.values()];
@@ -220,7 +222,7 @@ async function run() {
     };
     const noteEvent = (event) => {
         lastEventAtMs = Date.now();
-        appendJsonLine(eventsPath, event);
+        appendJsonLine(eventsPath, { ...event, phaseLabel: event.phase ? phaseLabel(event.phase) : undefined });
         if (event.sessionId)
             status.sessionId = event.sessionId;
         if (event.phase)
@@ -269,7 +271,7 @@ async function run() {
         }
         persistStatus();
         if (["PreToolUse", "SubagentStart", "SubagentStop", "PostToolUseFailure"].includes(event.kind)) {
-            process.stderr.write(`[claude-coordinator] ${status.phase} · ${event.kind}${event.toolName ? ` ${event.toolName}` : ""}${event.summary ? ` · ${event.summary}` : ""}\n`);
+            process.stderr.write(`[claude-coordinator] ${status.phaseLabel} · ${event.kind}${event.toolName ? ` ${event.toolName}` : ""}${event.summary ? ` · ${event.summary}` : ""}\n`);
         }
     };
     const terminate = (state, reason) => {
@@ -329,7 +331,7 @@ async function run() {
     const heartbeatTimer = setInterval(() => {
         persistStatus();
         const activity = status.currentActivity?.label ?? "等待 Claude 事件";
-        process.stderr.write(`[claude-coordinator] heartbeat · ${status.elapsedSeconds}s · ${status.phase} · ${activity} · ${runDirectory}\n`);
+        process.stderr.write(`[claude-coordinator] 心跳 · ${status.elapsedSeconds}s · ${status.phaseLabel} · ${activity} · ${runDirectory}\n`);
     }, options.heartbeatSeconds * 1000);
     const watchdogTimer = setInterval(() => {
         const now = Date.now();

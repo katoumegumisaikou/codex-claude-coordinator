@@ -9,6 +9,7 @@ import {
   normalizeHookEvent,
   normalizeStreamEvent,
   phaseForTool,
+  phaseLabel,
   redactText,
   reportIndicatesBlocker,
   sanitizeValue,
@@ -70,6 +71,12 @@ test("maps common commands to generic phases", () => {
   assert.equal(phaseForTool("TaskCreate"), "plan");
   assert.equal(phaseForTool("Bash", "npm run build"), "verify");
   assert.equal(phaseForTool("Bash", "mkdir output"), "execute");
+  assert.equal(phaseLabel("preflight"), "预检");
+  assert.equal(phaseLabel("discover"), "调研");
+  assert.equal(phaseLabel("plan"), "规划");
+  assert.equal(phaseLabel("execute"), "实现");
+  assert.equal(phaseLabel("verify"), "验证");
+  assert.equal(phaseLabel("deliver"), "交付");
 });
 
 test("detects substantive blocker reports", () => {

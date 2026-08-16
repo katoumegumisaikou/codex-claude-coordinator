@@ -12,6 +12,7 @@ import {
   normalizeHookEvent,
   normalizeStreamEvent,
   numberField,
+  phaseLabel,
   redactText,
   reportIndicatesBlocker,
   stringField,
@@ -60,6 +61,7 @@ interface RunStatus {
   runDirectory: string;
   state: RunState;
   phase: RunPhase;
+  phaseLabel: string;
   startedAt: string;
   updatedAt: string;
   lastEventAt: string;
@@ -282,6 +284,7 @@ async function run(): Promise<number> {
     runDirectory,
     state: "queued",
     phase: "queued",
+    phaseLabel: phaseLabel("queued"),
     startedAt: new Date(startedAtMs).toISOString(),
     updatedAt: new Date(startedAtMs).toISOString(),
     lastEventAt: new Date(startedAtMs).toISOString(),
@@ -300,6 +303,7 @@ async function run(): Promise<number> {
   const persistStatus = (): void => {
     const now = Date.now();
     status.updatedAt = new Date(now).toISOString();
+    status.phaseLabel = phaseLabel(status.phase);
     status.lastEventAt = new Date(lastEventAtMs).toISOString();
     status.elapsedSeconds = Math.max(0, Math.round((now - startedAtMs) / 1000));
     status.agents = [...agents.values()];
@@ -309,7 +313,7 @@ async function run(): Promise<number> {
 
   const noteEvent = (event: NormalizedEvent): void => {
     lastEventAtMs = Date.now();
-    appendJsonLine(eventsPath, event);
+    appendJsonLine(eventsPath, { ...event, phaseLabel: event.phase ? phaseLabel(event.phase) : undefined });
     if (event.sessionId) status.sessionId = event.sessionId;
     if (event.phase) status.phase = event.phase;
 
@@ -351,7 +355,7 @@ async function run(): Promise<number> {
 
     persistStatus();
     if (["PreToolUse", "SubagentStart", "SubagentStop", "PostToolUseFailure"].includes(event.kind)) {
-      process.stderr.write(`[claude-coordinator] ${status.phase} · ${event.kind}${event.toolName ? ` ${event.toolName}` : ""}${event.summary ? ` · ${event.summary}` : ""}\n`);
+      process.stderr.write(`[claude-coordinator] ${status.phaseLabel} · ${event.kind}${event.toolName ? ` ${event.toolName}` : ""}${event.summary ? ` · ${event.summary}` : ""}\n`);
     }
   };
 
@@ -405,7 +409,7 @@ async function run(): Promise<number> {
   const heartbeatTimer = setInterval(() => {
     persistStatus();
     const activity = status.currentActivity?.label ?? "等待 Claude 事件";
-    process.stderr.write(`[claude-coordinator] heartbeat · ${status.elapsedSeconds}s · ${status.phase} · ${activity} · ${runDirectory}\n`);
+    process.stderr.write(`[claude-coordinator] 心跳 · ${status.elapsedSeconds}s · ${status.phaseLabel} · ${activity} · ${runDirectory}\n`);
   }, options.heartbeatSeconds * 1000);
   const watchdogTimer = setInterval(() => {
     const now = Date.now();

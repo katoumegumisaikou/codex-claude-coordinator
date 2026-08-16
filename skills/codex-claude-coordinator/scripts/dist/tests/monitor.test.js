@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureRuntimeIgnored, extractFinalReport, normalizeHookEvent, normalizeStreamEvent, phaseForTool, redactText, reportIndicatesBlocker, sanitizeValue, } from "../monitor.js";
+import { ensureRuntimeIgnored, extractFinalReport, normalizeHookEvent, normalizeStreamEvent, phaseForTool, phaseLabel, redactText, reportIndicatesBlocker, sanitizeValue, } from "../monitor.js";
 test("redacts common credentials and sensitive keys", () => {
     const token = `ghp_${"a".repeat(30)}`;
     assert.equal(redactText(`Authorization: Bearer abc.def ${token}`).includes(token), false);
@@ -57,6 +57,12 @@ test("maps common commands to generic phases", () => {
     assert.equal(phaseForTool("TaskCreate"), "plan");
     assert.equal(phaseForTool("Bash", "npm run build"), "verify");
     assert.equal(phaseForTool("Bash", "mkdir output"), "execute");
+    assert.equal(phaseLabel("preflight"), "预检");
+    assert.equal(phaseLabel("discover"), "调研");
+    assert.equal(phaseLabel("plan"), "规划");
+    assert.equal(phaseLabel("execute"), "实现");
+    assert.equal(phaseLabel("verify"), "验证");
+    assert.equal(phaseLabel("deliver"), "交付");
 });
 test("detects substantive blocker reports", () => {
     assert.equal(reportIndicatesBlocker("阻塞问题\n无"), false);

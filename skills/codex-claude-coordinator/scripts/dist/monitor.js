@@ -1,5 +1,17 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+const PHASE_LABELS = {
+    queued: "排队",
+    preflight: "预检",
+    discover: "调研",
+    plan: "规划",
+    execute: "实现",
+    verify: "验证",
+    deliver: "交付",
+};
+export function phaseLabel(phase) {
+    return PHASE_LABELS[phase];
+}
 const SECRET_KEY = /(?:authorization|cookie|credential|password|passwd|secret|token|api[_-]?key|private[_-]?key)/i;
 const OMITTED_KEY = /^(?:thinking|signature|prompt|transcript_path|tool_response|full_content)$/i;
 export function isRecord(value) {
